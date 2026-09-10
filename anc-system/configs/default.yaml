@@ -1,0 +1,36 @@
+# AcoustiX — default training config
+sample_rate: 16000
+segment_seconds: 4          # training crop length
+model: rnnoise               # rnnoise | conv_tasnet | dtln
+model_params:
+  rnnoise:
+    n_fft: 512
+    hop_length: 128
+    gru_hidden: 128
+  conv_tasnet:
+    encoder_dim: 128
+    kernel_size: 16
+    stride: 8
+    tcn_channels: 128
+    tcn_blocks: 6
+    tcn_repeats: 2
+  dtln:
+    n_fft: 512
+    hop_length: 128
+    lstm1_hidden: 128
+    encoder_dim: 256
+    encoder_kernel: 32
+    lstm2_hidden: 128
+
+train:
+  batch_size: 8
+  epochs: 30
+  lr: 0.001
+  l1_weight: 0.1
+  checkpoint_dir: checkpoints
+  device: cuda   # falls back to cpu automatically if unavailable
+
+data:
+  train_manifest: data/manifests/train.csv
+  val_manifest: data/manifests/val.csv
+  test_manifest: data/manifests/test.csv
