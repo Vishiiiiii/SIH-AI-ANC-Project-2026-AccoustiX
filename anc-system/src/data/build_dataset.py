@@ -14,7 +14,7 @@ import random
 
 import soundfile as sf
 
-from src.data.mix import mix_at_snr
+from src.data.mix import mix_at_snr, randomize_impulsive_onset
 
 DEFAULT_SNRS = [-5, 0, 5, 10, 15]
 
@@ -48,6 +48,9 @@ def build_split(split_name, n_examples, speech_files, noise_rows, out_dir, snrs,
                 "Resample your corpora to a common rate (16kHz recommended) before mixing."
             )
 
+        if noise_row["category"] == "impulsive":
+            noise = randomize_impulsive_onset(noise, len(clean))
+        
         noisy, clean = mix_at_snr(clean, noise, snr)
 
         noisy_path = split_dir / f"noisy_{i:05d}.wav"
@@ -88,6 +91,19 @@ if __name__ == "__main__":
         raise SystemExit(f"No .wav/.flac files found under {args.speech_dir}")
     if not noise_rows:
         raise SystemExit(f"Noise manifest {args.noise_manifest} is empty")
+
+    # Drop unlabeled clips — an "unknown" category is meaningless for
+    # per-category evaluation downstream, so don't let them leak into training.
+    n_before = len(noise_rows)
+    noise_rows = [r for r in noise_rows if r["category"] != "unknown"]
+    n_dropped = n_before - len(noise_rows)
+    if n_dropped:
+        print(f"Dropped {n_dropped}/{n_before} noise clips with category='unknown'.")
+    if not noise_rows:
+        raise SystemExit(
+            "All noise clips are labeled 'unknown' after filtering — check "
+            "KEYWORD_CATEGORY_MAP / ESC50_CATEGORY_MAP in noise_manifest.py."
+        )
 
     # IMPORTANT: split speech files (and ideally noise clips too) BEFORE
     # sampling, so the same speaker/clip never appears in both train and test.

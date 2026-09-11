@@ -51,9 +51,13 @@ def randomize_impulsive_onset(noise: np.ndarray, clean_len: int, min_silence_rat
     For impulsive noises (gunfire/explosions), pad with silence so the event
     doesn't always land at t=0 — otherwise the model just learns "suppress the
     start of the clip" instead of learning to detect transients anywhere.
+
+    If the noise clip is already >= clean_len, take a random crop instead of
+    always the first clean_len samples, for the same reason.
     """
     if len(noise) >= clean_len:
-        return noise[:clean_len]
+        start = random.randint(0, len(noise) - clean_len)
+        return noise[start:start + clean_len]
     max_pad = int(clean_len - len(noise))
     pad_before = random.randint(0, max_pad)
     pad_after = max_pad - pad_before
