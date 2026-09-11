@@ -1,249 +1,196 @@
 """
-
 Tag raw noise clips by category (stationary / non_stationary / impulsive)
-
 so downstream mixing + evaluation can report per-category metrics.
 
-
-
 Supports:
-
   1. FreeNoise directory: Multi-format audio (.wav, .flac, .mp4, etc.) categorized via keywords.
-
   2. ESC-50 dataset: Uses esc50.csv to resolve filenames and maps ESC-50 classes to broader noise categories.
-
-
+  3. Impact-set: category = subfolder name (matched case/punctuation-insensitively).
+  4. SESA: category = filename prefix (matched case/punctuation-insensitively).
 
 Usage:
-
     python -m src.data.noise_manifest --noise_dir data/raw/noise --out_csv data/manifests/noise_manifest.csv
-
 """
-
 import argparse
-
 import csv
-
 import pathlib
-
 from typing import Dict
 
-
-
 # Keyword matching for FreeNoise / unstructured files
-
 KEYWORD_CATEGORY_MAP = {
-
     "engine": "stationary", "hvac": "stationary", "hum": "stationary",
-
     "fan": "stationary", "generator": "stationary",
-
     "wind": "non_stationary", "chatter": "non_stationary", "rotor": "non_stationary",
-
     "crowd": "non_stationary", "traffic": "non_stationary", "rain": "non_stationary",
-
     "gunfires": "impulsive", "explosions": "impulsive", "artillery": "impulsive",
-
     "gunshots": "impulsive", "blast": "impulsive",
-
 }
-
-
 
 # Mapping ESC-50 ground truth categories to high-level noise profiles
-
 ESC50_CATEGORY_MAP = {
-
     # Impulsive
-
     "fireworks": "impulsive",
-
     "door_wood_knock": "impulsive",
-
     "glass_breaking": "impulsive",
-
     "car_horn": "impulsive",
-
     # Stationary
-
     "engine": "stationary",
-
     "airplane": "stationary",
-
     "train": "stationary",
-
     "siren": "stationary",
-
     # Non-Stationary
-
     "rain": "non_stationary",
-
     "crackling_fire": "non_stationary",
-
     "wind": "non_stationary",
-
     "pouring_water": "non_stationary",
-
     "footsteps": "non_stationary",
-
     "breathing": "non_stationary",
-
     "coughing": "non_stationary",
-
     "helicopter": "non_stationary",
-
     "thunderstorm": "non_stationary",
-
     "door_wood_creaks": "non_stationary",
-
 }
 
+# Impact-set: category = subfolder name
+IMPACTSET_CATEGORY_MAP = {
+    "gunshots": "impulsive",
+    "explosion": "impulsive",
+    "knocks": "impulsive",
+    "smash": "impulsive",
+    "footsteps": "non_stationary",
+    "bounce": "unknown",   # explicitly excluded
+    "punch": "unknown",    # explicitly excluded
+}
 
+# SESA: category = filename prefix before "_"
+SESA_CATEGORY_MAP = {
+    "gunshot": "impulsive",
+    "explosion": "impulsive",
+    "siren": "stationary",
+    "casual": "non_stationary",
+}
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp4", ".mp3", ".ogg", ".m4a"}
 
 
-
+def _normalize(s: str) -> str:
+    """Lowercase and strip hyphens/underscores/spaces, so 'Impact-set',
+    'impact_set', 'ImpactSet', and 'impactset' all compare equal. This is
+    the fix for the Impact-set folder-name mismatch: the raw dataset folder
+    is named 'Impact-set' (hyphen), but the old exact-match check only
+    looked for 'impactset' -- every file silently fell into 'unknown'."""
+    return s.lower().replace("-", "").replace("_", "").replace(" ", "")
 
 
 def load_esc50_manifest(esc50_dir: pathlib.Path) -> Dict[str, str]:
-
     """Reads esc50.csv metadata and builds a filename-to-category mapping."""
-
     esc50_map = {}
-
     csv_candidates = list(esc50_dir.rglob("esc50.csv"))
 
-    
-
     if not csv_candidates:
-
         print(f"Warning: esc50.csv not found in {esc50_dir}. Skipping ESC-50 metadata lookup.")
-
         return esc50_map
 
-
-
     csv_path = csv_candidates[0]
-
     with open(csv_path, mode="r", encoding="utf-8") as fh:
-
         reader = csv.DictReader(fh)
-
         for row in reader:
-
             filename = row["filename"]
-
             raw_category = row["category"].lower()
-
             mapped_category = ESC50_CATEGORY_MAP.get(raw_category, "unknown")
-
             esc50_map[filename] = mapped_category
-
-
 
     return esc50_map
 
 
-
-
-
 def categorize(file_path: pathlib.Path, esc50_map: Dict[str, str]) -> str:
+    """
+    Categorize noise using:
+      1. ESC-50 metadata
+      2. Impact-set folder structure
+      3. SESA filename prefix
+      4. FreeNoise filename keywords
+    """
+    norm_parts = [_normalize(p) for p in file_path.parts]
+    stem = file_path.stem.lower()
+    norm_stem = _normalize(stem)
 
-    """Categorizes an audio file based on metadata lookup or keyword matching."""
-
-    # 1. ESC-50 exact metadata match
-
+    # ---------------------------------------------------------
+    # 1. ESC-50 exact metadata
+    # ---------------------------------------------------------
     if file_path.name in esc50_map:
-
         return esc50_map[file_path.name]
 
+    # ---------------------------------------------------------
+    # 2. Impact-set (matched normalized -- handles 'Impact-set', 'impact_set', etc.)
+    #
+    # Expected:
+    # data/raw/noise/dataset_acoustix/Impact-set/train/explosion/0139.wav
+    # data/raw/noise/dataset_acoustix/Impact-set/test/gunshots/....
+    # ---------------------------------------------------------
+    if "impactset" in norm_parts:
+        for subfolder, category in IMPACTSET_CATEGORY_MAP.items():
+            if subfolder in norm_parts:
+                return category
+        # In an Impact-set path but none of the known subfolder names matched
+        # -- likely a new/renamed class. Falls through to "unknown" below.
 
+    # ---------------------------------------------------------
+    # 3. SESA (matched normalized)
+    #
+    # Expected filenames:
+    # gunshot_014.wav
+    # explosion_156.wav
+    # siren_035.wav
+    # casual_000.wav
+    # ---------------------------------------------------------
+    if "sesa" in norm_parts:
+        for prefix, category in SESA_CATEGORY_MAP.items():
+            if norm_stem.startswith(prefix):
+                return category
 
-    # 2. FreeNoise keyword fallback
-
-    stem = file_path.stem.lower()
-
+    # ---------------------------------------------------------
+    # 4. FreeNoise keyword fallback
+    # ---------------------------------------------------------
     for keyword, category in KEYWORD_CATEGORY_MAP.items():
-
         if keyword in stem:
-
             return category
-
-
 
     return "unknown"
 
 
-
-
-
 def build_manifest(noise_dir: str, out_csv: str) -> int:
-
     base_dir = pathlib.Path(noise_dir)
-
     esc50_map = load_esc50_manifest(base_dir)
 
-
-
     rows = []
-
     for file_path in base_dir.rglob("*"):
-
         if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
-
             category = categorize(file_path, esc50_map)
-
             rows.append({"path": str(file_path), "category": category})
 
-
-
     out_path = pathlib.Path(out_csv)
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
-
         writer = csv.DictWriter(fh, fieldnames=["path", "category"])
-
         writer.writeheader()
-
         writer.writerows(rows)
 
-
-
     unknown = sum(1 for r in rows if r["category"] == "unknown")
-
     print(
-
-        f"Wrote {len(rows)} noise clips to {out_csv} ({unknown} unlabeled — "
-
+        f"Wrote {len(rows)} noise clips to {out_csv} ({unknown} unlabeled -- "
         f"rename files, update ESC50_CATEGORY_MAP, or extend KEYWORD_CATEGORY_MAP)."
-
     )
-
     return len(rows)
 
 
-
-
-
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description=__doc__)
-
     parser.add_argument(
-
         "--noise_dir",
-
         required=True,
-
         help="Directory containing FreeNoise and ESC-50 dataset folders",
-
     )
-
     parser.add_argument("--out_csv", required=True, help="Output manifest CSV path")
-
     args = parser.parse_args()
-
     build_manifest(args.noise_dir, args.out_csv)

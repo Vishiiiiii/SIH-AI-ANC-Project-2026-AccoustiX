@@ -19,7 +19,8 @@ import numpy as np
 import onnxruntime as ort
 import sounddevice as sd
 
-from src.filters.wiener import wiener_denoise
+#from src.filters.wiener import wiener_denoise
+from src.filters.wiener import WienerFilter
 
 SAMPLE_RATE = 16000
 BLOCK_SECONDS = 0.25          # chunk size fed to the model each callback
@@ -31,6 +32,7 @@ class ANCPipeline:
         self.session = ort.InferenceSession(onnx_path)
         self.input_name = self.session.get_inputs()[0].name
         self.use_classical = use_classical
+        self.wiener = WienerFilter()
         self.latencies = []
 
     def process(self, block: np.ndarray) -> np.ndarray:
@@ -38,10 +40,11 @@ class ANCPipeline:
 
         x = block
         if self.use_classical:
+            x = self.wiener.process(x)
             # Cheap first pass — see filters/wiener.py note: this re-estimates
             # noise from the first ms of EVERY block, which is a simplification;
             # for a real deployment, keep a running noise estimate across blocks.
-            x = wiener_denoise(x, SAMPLE_RATE, noise_estimate_ms=50)
+            # x = wiener_denoise(x, SAMPLE_RATE, noise_estimate_ms=50)
 
         onnx_in = x.astype(np.float32)[None, :]      # (1, T)
         enhanced = self.session.run(None, {self.input_name: onnx_in})[0][0]

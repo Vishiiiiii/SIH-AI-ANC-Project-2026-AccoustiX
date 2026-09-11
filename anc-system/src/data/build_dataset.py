@@ -29,6 +29,29 @@ def find_speech_files(speech_dir):
            [str(p) for p in pathlib.Path(speech_dir).rglob("*.wav")]
 
 
+def split_noise_by_category(noise_rows, seed=0, train_frac=0.8, val_frac=0.1):
+    """Split noise clips into non-overlapping train/val/test pools, stratified
+    by category, so the same underlying noise clip never appears in more than
+    one split. (Missing before — only speech was split this way, not noise.)"""
+    from collections import defaultdict
+    rng = random.Random(seed)
+    by_category = defaultdict(list)
+    for row in noise_rows:
+        by_category[row["category"]].append(row)
+
+    train_rows, val_rows, test_rows = [], [], []
+    for category, rows in by_category.items():
+        rows = rows[:]
+        rng.shuffle(rows)
+        n = len(rows)
+        n_train = max(1, int(train_frac * n))
+        n_val = max(1, int(val_frac * n)) if n - n_train > 1 else 0
+        train_rows += rows[:n_train]
+        val_rows += rows[n_train:n_train + n_val]
+        test_rows += rows[n_train + n_val:]
+    return train_rows, val_rows, test_rows
+
+
 def build_split(split_name, n_examples, speech_files, noise_rows, out_dir, snrs, seed):
     rng = random.Random(seed)
     split_dir = pathlib.Path(out_dir) / split_name
@@ -114,6 +137,8 @@ if __name__ == "__main__":
     val_speech = speech_files[int(0.8 * n): int(0.9 * n)] or speech_files
     test_speech = speech_files[int(0.9 * n):] or speech_files
 
-    build_split("train", args.n_train, train_speech, noise_rows, args.out_dir, args.snrs, args.seed)
-    build_split("val", args.n_val, val_speech, noise_rows, args.out_dir, args.snrs, args.seed + 1)
-    build_split("test", args.n_test, test_speech, noise_rows, args.out_dir, args.snrs, args.seed + 2)
+    train_noise, val_noise, test_noise = split_noise_by_category(noise_rows, seed=args.seed)
+
+    build_split("train", args.n_train, train_speech, train_noise, args.out_dir, args.snrs, args.seed)
+    build_split("val", args.n_val, val_speech, val_noise, args.out_dir, args.snrs, args.seed + 1)
+    build_split("test", args.n_test, test_speech, test_noise, args.out_dir, args.snrs, args.seed + 2)

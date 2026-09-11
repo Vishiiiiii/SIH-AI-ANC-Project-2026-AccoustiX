@@ -54,6 +54,16 @@ def randomize_impulsive_onset(noise: np.ndarray, clean_len: int, min_silence_rat
 
     If the noise clip is already >= clean_len, take a random crop instead of
     always the first clean_len samples, for the same reason.
+
+    Bug fix: this function runs BEFORE mix_at_snr's mono conversion, so
+    `noise` may still be stereo (T, 2) here -- not just (T,) -- if the source
+    file is a stereo recording. np.pad(noise, (pad_before, pad_after)) pads
+    EVERY axis of the array when given a flat 2-tuple, not just axis 0, so a
+    stereo clip got padded on the channel axis too (2 -> up to hundreds of
+    channels, mostly zeros). That silently crushed the impulsive event almost
+    to silence once mix_at_snr's `.mean(axis=1)` averaged it back down,
+    without ever raising an error. Fixed by only padding axis 0 and leaving
+    any other axes (channels) untouched.
     """
     if len(noise) >= clean_len:
         start = random.randint(0, len(noise) - clean_len)
@@ -61,4 +71,8 @@ def randomize_impulsive_onset(noise: np.ndarray, clean_len: int, min_silence_rat
     max_pad = int(clean_len - len(noise))
     pad_before = random.randint(0, max_pad)
     pad_after = max_pad - pad_before
-    return np.pad(noise, (pad_before, pad_after))
+    if noise.ndim == 1:
+        pad_width = (pad_before, pad_after)
+    else:
+        pad_width = [(pad_before, pad_after)] + [(0, 0)] * (noise.ndim - 1)
+    return np.pad(noise, pad_width)
