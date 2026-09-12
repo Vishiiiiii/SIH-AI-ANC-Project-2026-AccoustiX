@@ -1,0 +1,36 @@
+# v3: live 128 ms front end plus raw-primary context and complex mask output.
+sample_rate: 16000
+segment_seconds: 0.128
+model: dual_mic_complex_rnnoise
+model_params:
+  dual_mic_complex_rnnoise:
+    n_fft: 512
+    hop_length: 128
+    gru_hidden: 192
+    conv_channels: 256
+
+train:
+  batch_size: 20
+  num_workers: 0
+  epochs: 80
+  lr: 0.0003
+  l1_weight: 0.1
+  spectral_weight: 0.75
+  weight_decay: 0.00001
+  gradient_clip_norm: 5.0
+  lr_decay: 0.5
+  lr_patience: 6
+  checkpoint_dir: checkpoints/dualmic_v3_complex
+  device: cuda
+
+front_end:
+  nlms_taps: 128
+  nlms_mu: 0.002
+  use_wiener: true
+  block_samples: 2048
+
+data:
+  input: dual_mic_primary_context
+  train_manifest: data/dual_mic_v2_live/manifests_front_end/train.csv
+  val_manifest: data/dual_mic_v2_live/manifests_front_end/val.csv
+  test_manifest: data/dual_mic_v2_live/manifests_front_end/test.csv

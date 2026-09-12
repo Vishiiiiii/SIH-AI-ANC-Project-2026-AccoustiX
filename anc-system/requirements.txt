@@ -5,11 +5,12 @@ numpy>=1.24.0
 
 # Audio Processing
 soundfile>=0.12.0
-librosa>=0.10.0
+scipy>=1.10.0
 sounddevice>=0.4.6
 
-# Adaptive Filters (classical ANC stage)
-adaptfilt>=0.3
+# Optional: accelerates the one-time dual-mic dataset precompute. The live
+# NLMS implementation does not require it.
+numba>=0.61.0
 
 # Deployment
 onnx>=1.14.0

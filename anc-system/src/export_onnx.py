@@ -14,8 +14,12 @@ import yaml
 from src.models.rnnoise import RNNoiseStyle
 from src.models.conv_tasnet import ConvTasNetLite
 from src.models.dtln import DTLN
+from src.models.dual_mic_rnnoise import DualMicRNNoiseStyle
+from src.models.dual_mic_complex_rnnoise import DualMicComplexRNNoiseStyle
 
-MODEL_REGISTRY = {"rnnoise": RNNoiseStyle, "conv_tasnet": ConvTasNetLite, "dtln": DTLN}
+MODEL_REGISTRY = {"rnnoise": RNNoiseStyle, "conv_tasnet": ConvTasNetLite, "dtln": DTLN,
+                  "dual_mic_rnnoise": DualMicRNNoiseStyle}
+MODEL_REGISTRY["dual_mic_complex_rnnoise"] = DualMicComplexRNNoiseStyle
 
 
 def export(cfg, checkpoint_path, out_path, export_seconds=None):
@@ -37,11 +41,13 @@ def export(cfg, checkpoint_path, out_path, export_seconds=None):
 
     sample_rate = cfg["sample_rate"]
     export_seconds = export_seconds or 0.25
-    dummy = torch.randn(1, int(sample_rate * export_seconds))
+    samples = int(sample_rate * export_seconds)
+    input_channels = getattr(model, "input_channels", 1)
+    dummy = torch.randn(1, input_channels, samples) if input_channels > 1 else torch.randn(1, samples)
 
     torch.onnx.export(
         model, dummy, out_path,
-        input_names=["noisy_waveform"], output_names=["enhanced_waveform"],
+        input_names=["dual_mic_waveforms" if input_channels > 1 else "noisy_waveform"], output_names=["enhanced_waveform"],
         opset_version=17,
         dynamo=False,  # torch>=2.7's new dynamo-based exporter needs the extra
                         # 'onnxscript' package; the legacy TorchScript-based
@@ -55,7 +61,11 @@ def export(cfg, checkpoint_path, out_path, export_seconds=None):
     with torch.no_grad():
         torch_out = model(dummy).numpy()
     sess = ort.InferenceSession(out_path)
-    onnx_out = sess.run(None, {"noisy_waveform": dummy.numpy()})[0]
+    # Dual-mic graphs use ``dual_mic_waveforms`` while legacy models use
+    # ``noisy_waveform``. Read the exported graph's actual input name rather
+    # than assuming the legacy one, so parity validates every model variant.
+    onnx_input_name = sess.get_inputs()[0].name
+    onnx_out = sess.run(None, {onnx_input_name: dummy.numpy()})[0]
     max_diff = abs(torch_out - onnx_out).max()
     print(f"Max abs diff between PyTorch and ONNX output: {max_diff:.2e} "
           f"({'OK' if max_diff < 1e-3 else 'WARNING: check export'})")

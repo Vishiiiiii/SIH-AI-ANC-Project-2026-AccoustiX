@@ -14,10 +14,18 @@ class NLMSFilter:
         self.num_taps = num_taps
         self.mu = mu
         self.eps = eps
-        self.weights = np.zeros(num_taps, dtype=np.float64)
+        if num_taps < 1:
+            raise ValueError("num_taps must be at least 1")
+        self.weights = np.zeros(num_taps, dtype=np.float32)
+        # Keep the tail of the reference channel between audio callbacks.
+        # Resetting this history every block creates a short transient at each
+        # boundary and prevents the adaptive filter from behaving as a single
+        # continuous filter.
+        self.reference_history = np.zeros(num_taps - 1, dtype=np.float32)
 
     def reset(self):
         self.weights[:] = 0.0
+        self.reference_history[:] = 0.0
 
     def run(self, primary: np.ndarray, reference: np.ndarray):
         """
@@ -26,18 +34,25 @@ class NLMSFilter:
         returns:   (error_signal, noise_estimate) — error_signal is the
                    noise-cancelled output.
         """
+        primary = np.asarray(primary, dtype=np.float32).reshape(-1)
+        reference = np.asarray(reference, dtype=np.float32).reshape(-1)
+        if len(primary) != len(reference):
+            raise ValueError("primary and reference must have the same number of samples")
+
         n = len(primary)
-        ref_padded = np.concatenate([np.zeros(self.num_taps - 1), reference])
-        error = np.zeros(n, dtype=np.float64)
-        noise_est = np.zeros(n, dtype=np.float64)
+        ref_padded = np.concatenate([self.reference_history, reference])
+        error = np.empty(n, dtype=np.float32)
+        noise_est = np.empty(n, dtype=np.float32)
 
         for i in range(n):
             x = ref_padded[i:i + self.num_taps][::-1]
-            y = float(np.dot(self.weights, x))
+            y = np.dot(self.weights, x)
             e = primary[i] - y
-            norm = float(np.dot(x, x)) + self.eps
+            norm = np.dot(x, x) + self.eps
             self.weights += (self.mu / norm) * e * x
             error[i] = e
             noise_est[i] = y
 
-        return error.astype(np.float32), noise_est.astype(np.float32)
+        if self.num_taps > 1:
+            self.reference_history[:] = ref_padded[-(self.num_taps - 1):]
+        return error, noise_est

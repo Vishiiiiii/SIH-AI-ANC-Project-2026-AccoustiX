@@ -1,30 +1,46 @@
-"""
-Evaluate a trained checkpoint on the test manifest, broken down by noise
-category (stationary / non_stationary / impulsive) — this per-category
-table is exactly what the plan calls for in section 7.
+"""Evaluate the dual-mic AcoustiX pipeline on its held-out test split.
 
-Usage:
-    python -m src.evaluate --config configs/default.yaml --checkpoint checkpoints/best_model.pt
+It compares the stages that matter to the project claim:
+
+1. Raw primary microphone (speech + noise)
+2. NLMS only (benefit of the reference microphone)
+3. NLMS + Wiener (classical front end)
+4. NLMS + Wiener + RNNoise-style model (full hybrid)
+
+Metrics are reported overall and by noise category.
 """
+from __future__ import annotations
+
 import argparse
 import csv
 from collections import defaultdict
 
+import numpy as np
+import soundfile as sf
 import torch
 import yaml
-import soundfile as sf
 
-from src.models.rnnoise import RNNoiseStyle
 from src.models.conv_tasnet import ConvTasNetLite
 from src.models.dtln import DTLN
+from src.models.dual_mic_rnnoise import DualMicRNNoiseStyle
+from src.models.dual_mic_complex_rnnoise import DualMicComplexRNNoiseStyle
+from src.models.rnnoise import RNNoiseStyle
 from src.train_utils import si_snr
 
-MODEL_REGISTRY = {"rnnoise": RNNoiseStyle, "conv_tasnet": ConvTasNetLite, "dtln": DTLN}
+
+MODEL_REGISTRY = {
+    "rnnoise": RNNoiseStyle,
+    "conv_tasnet": ConvTasNetLite,
+    "dtln": DTLN,
+    "dual_mic_rnnoise": DualMicRNNoiseStyle,
+    "dual_mic_complex_rnnoise": DualMicComplexRNNoiseStyle,
+}
 
 try:
     from pesq import pesq as pesq_fn
 except ImportError:
     pesq_fn = None
+
 try:
     from pystoi import stoi as stoi_fn
 except ImportError:
@@ -33,62 +49,159 @@ except ImportError:
 
 def load_model(cfg, checkpoint_path, device):
     name = cfg["model"]
-    params = cfg.get("model_params", {}).get(name, {})
-    model = MODEL_REGISTRY[name](**params)
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(ckpt["model_state"])
-    model.to(device).eval()
-    return model
+    model = MODEL_REGISTRY[name](**cfg.get("model_params", {}).get(name, {}))
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state"])
+    return model.to(device).eval()
+
+
+def prepare_pair(clean, estimate):
+    length = min(len(clean), len(estimate))
+    return (
+        np.nan_to_num(np.asarray(clean[:length], dtype=np.float32)),
+        np.nan_to_num(np.asarray(estimate[:length], dtype=np.float32)),
+    )
+
+
+def calculate_metrics(clean, estimate, sample_rate):
+    clean, estimate = prepare_pair(clean, estimate)
+    clean_t = torch.from_numpy(clean).unsqueeze(0)
+    estimate_t = torch.from_numpy(estimate).unsqueeze(0)
+    # si_snr is implemented as a loss, hence the negative sign.
+    error = estimate - clean
+    output = {
+        "si_snr": float(-si_snr(estimate_t, clean_t).item()),
+        "snr": float(10 * np.log10((np.sum(clean ** 2) + 1e-8) / (np.sum(error ** 2) + 1e-8))),
+    }
+
+    if pesq_fn is not None:
+        try:
+            output["pesq"] = float(pesq_fn(sample_rate, clean, estimate,
+                                             "wb" if sample_rate == 16000 else "nb"))
+        except Exception:
+            # PESQ can reject rare degenerate clips; keep the rest of the test
+            # evaluation valid and average only successful PESQ calls.
+            pass
+    if stoi_fn is not None:
+        try:
+            output["stoi"] = float(stoi_fn(clean, estimate, sample_rate, extended=False))
+        except Exception:
+            pass
+    return output
+
+
+def averages(items):
+    return {
+        key: float(np.mean([item[key] for item in items if key in item]))
+        if any(key in item for item in items) else float("nan")
+        for key in ("si_snr", "snr", "pesq", "stoi")
+    }
+
+
+def print_overall(label, items):
+    result = averages(items)
+    print(f"{label:<24} SI-SNR={result['si_snr']:.2f}  SNR={result['snr']:.2f}  PESQ={result['pesq']:.3f}  STOI={result['stoi']:.3f}")
+
+
+def print_categories(label, grouped):
+    print(f"\n{label}\n{'=' * len(label)}")
+    print(f"{'category':<18}{'n':>6}{'SI-SNR':>12}{'SNR':>10}{'PESQ':>10}{'STOI':>10}")
+    for category, items in sorted(grouped.items()):
+        result = averages(items)
+        print(f"{category:<18}{len(items):>6}{result['si_snr']:>12.2f}{result['snr']:>10.2f}{result['pesq']:>10.3f}{result['stoi']:>10.3f}")
 
 
 def evaluate(cfg, checkpoint_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    if pesq_fn is None:
+        print("WARNING: PESQ is not installed; PESQ will display as nan.")
+    if stoi_fn is None:
+        print("WARNING: STOI is not installed; STOI will display as nan.")
+
+    with open(cfg["data"]["test_manifest"], encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    required = {"raw_noisy_path", "nlms_path", "noisy_path", "clean_path", "category"}
+    missing = required - set(rows[0]) if rows else required
+    if missing:
+        raise RuntimeError(
+            f"Test manifest must be generated by preprocess_dualmic.py; missing {sorted(missing)}."
+        )
+
     model = load_model(cfg, checkpoint_path, device)
+    model_channels = getattr(model, "input_channels", 1)
+    stages = ("Raw primary", "NLMS only", "NLMS + Wiener", "Full hybrid")
+    all_results = {stage: [] for stage in stages}
+    by_category = {stage: defaultdict(list) for stage in stages}
 
-    with open(cfg["data"]["test_manifest"]) as fh:
-        rows = list(csv.DictReader(fh))
-
-    per_category = defaultdict(list)
     with torch.no_grad():
-        for row in rows:
-            noisy, sr = sf.read(row["noisy_path"], dtype="float32")
-            clean, _ = sf.read(row["clean_path"], dtype="float32")
+        for index, row in enumerate(rows, start=1):
+            raw, raw_sr = sf.read(row["raw_noisy_path"], dtype="float32")
+            nlms, nlms_sr = sf.read(row["nlms_path"], dtype="float32")
+            front_end, front_end_sr = sf.read(row["noisy_path"], dtype="float32")
+            clean, clean_sr = sf.read(row["clean_path"], dtype="float32")
+            if {raw_sr, nlms_sr, front_end_sr, clean_sr} != {clean_sr}:
+                raise RuntimeError(f"Sample-rate mismatch in test row {index}.")
 
-            noisy_t = torch.from_numpy(noisy).unsqueeze(0).to(device)
-            clean_t = torch.from_numpy(clean).unsqueeze(0).to(device)
-            estimate_t = model(noisy_t)
+            if model_channels == 3:
+                aligned_noise = raw - nlms
+                model_input = torch.from_numpy(
+                    np.stack((front_end, aligned_noise, raw)).astype(np.float32)
+                ).unsqueeze(0).to(device)
+            elif model_channels == 2:
+                # Same feature sent by the live pipeline: its Wiener residual
+                # plus NLMS's primary-aligned noise estimate.
+                aligned_noise = raw - nlms
+                model_input = torch.from_numpy(
+                    np.stack((front_end, aligned_noise)).astype(np.float32)
+                ).unsqueeze(0).to(device)
+            elif model_channels == 1:
+                model_input = torch.from_numpy(front_end).unsqueeze(0).to(device)
+            else:
+                raise RuntimeError(f"Unsupported model input channel count: {model_channels}")
+            enhanced = model(model_input)
+            enhanced = enhanced.squeeze(0).cpu().numpy().astype(np.float32)
+            signals = (raw, nlms, front_end, enhanced)
+            for stage, signal in zip(stages, signals, strict=True):
+                metric = calculate_metrics(clean, signal, clean_sr)
+                all_results[stage].append(metric)
+                by_category[stage][row["category"]].append(metric)
+            if index % 100 == 0 or index == len(rows):
+                print(f"Evaluated {index}/{len(rows)}")
 
-            sisnr = -si_snr(estimate_t, clean_t).item()  # flip sign back to "higher is better"
-            metrics = {"si_snr": sisnr}
+    print("\n" + "=" * 70 + "\nAcoustiX dual-mic test results\n" + "=" * 70)
+    for stage in stages:
+        print_overall(stage, all_results[stage])
 
-            estimate = estimate_t.squeeze(0).cpu().numpy()
-            if pesq_fn is not None and sr in (8000, 16000):
-                try:
-                    metrics["pesq"] = pesq_fn(sr, clean, estimate, "wb" if sr == 16000 else "nb")
-                except Exception:
-                    pass
-            if stoi_fn is not None:
-                try:
-                    metrics["stoi"] = stoi_fn(clean, estimate, sr, extended=False)
-                except Exception:
-                    pass
+    raw = averages(all_results["Raw primary"])
+    nlms = averages(all_results["NLMS only"])
+    classical = averages(all_results["NLMS + Wiener"])
+    hybrid = averages(all_results["Full hybrid"])
+    print("\nImprovement over raw")
+    for label, values in (("NLMS", nlms), ("NLMS + Wiener", classical), ("Full hybrid", hybrid)):
+        print(f"{label:<16} SI-SNR {values['si_snr'] - raw['si_snr']:+.2f} dB | SNR {values['snr'] - raw['snr']:+.2f} dB | "
+              f"PESQ {values['pesq'] - raw['pesq']:+.3f} | STOI {values['stoi'] - raw['stoi']:+.3f}")
+    print(f"Full hybrid vs classical: SI-SNR {hybrid['si_snr'] - classical['si_snr']:+.2f} dB | SNR {hybrid['snr'] - classical['snr']:+.2f} dB | "
+          f"PESQ {hybrid['pesq'] - classical['pesq']:+.3f} | STOI {hybrid['stoi'] - classical['stoi']:+.3f}")
 
-            per_category[row["category"]].append(metrics)
+    print("\nPrototype target check (full hybrid)")
+    for metric, threshold in (("snr", 15.0), ("stoi", 0.85), ("pesq", 2.5)):
+        value = hybrid[metric]
+        status = "PASS" if value >= threshold else "NOT YET"
+        print(f"{metric.upper():<5} {value:.3f}  target >= {threshold:.3f}  {status}")
 
-    print(f"{'category':<15} {'n':>5} {'SI-SNR':>10} {'PESQ':>10} {'STOI':>10}")
-    for category, results in sorted(per_category.items()):
-        n = len(results)
-        avg = lambda key: sum(r[key] for r in results if key in r) / max(1, sum(1 for r in results if key in r))
-        print(f"{category:<15} {n:>5} {avg('si_snr'):>10.2f} "
-              f"{avg('pesq') if any('pesq' in r for r in results) else float('nan'):>10.2f} "
-              f"{avg('stoi') if any('stoi' in r for r in results) else float('nan'):>10.2f}")
+    for stage in stages:
+        print_categories(f"{stage.upper()} BY CATEGORY", by_category[stage])
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
     args = parser.parse_args()
-    with open(args.config) as fh:
-        cfg = yaml.safe_load(fh)
-    evaluate(cfg, args.checkpoint)
+    with open(args.config, encoding="utf-8") as handle:
+        evaluate(yaml.safe_load(handle), args.checkpoint)
+
+
+if __name__ == "__main__":
+    main()

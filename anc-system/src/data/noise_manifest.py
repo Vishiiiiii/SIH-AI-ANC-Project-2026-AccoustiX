@@ -20,6 +20,8 @@ Usage:
 
 """
 
+from __future__ import annotations
+
 import argparse
 
 import csv
@@ -145,14 +147,74 @@ def load_esc50_manifest(esc50_dir: pathlib.Path) -> Dict[str, str]:
     return esc50_map
 
 
+# MAD (Military Audio Dataset) stores class IDs in training.csv/test.csv.
+# Communication is deliberately excluded because clean speech is the target;
+# the fighter class is omitted because it is acoustically ambiguous here.
+MAD_CATEGORY_MAP = {
+    "0": "unknown", "1": "impulsive", "2": "non_stationary",
+    "3": "impulsive", "4": "stationary", "5": "stationary",
+    "6": "unknown",
+}
+
+
+def load_mad_manifest(noise_dir: pathlib.Path) -> Dict[str, str]:
+    """Return absolute MAD WAV paths mapped from its two metadata CSVs."""
+    mapping = {}
+    for csv_path in noise_dir.rglob("training.csv"):
+        if csv_path.parent.name != "mad":
+            continue
+        for candidate in (csv_path, csv_path.parent / "test.csv"):
+            if not candidate.exists():
+                continue
+            with open(candidate, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    path = (candidate.parent / row["path"]).resolve()
+                    mapping[str(path)] = MAD_CATEGORY_MAP.get(row["label"], "unknown")
+    return mapping
+
+
+IMPACT_CATEGORY_MAP = {
+    "bounce": "unknown", "explosion": "impulsive", "gunshots": "impulsive",
+    "knocks": "impulsive", "punch": "unknown", "smash": "impulsive",
+    "footsteps": "non_stationary",
+}
+
+
+def source_category(file_path: pathlib.Path, mad_map: Dict[str, str]) -> str | None:
+    """Use source-specific metadata/folder labels before filename heuristics."""
+    resolved = str(file_path.resolve())
+    if resolved in mad_map:
+        return mad_map[resolved]
+    parts = {part.lower() for part in file_path.parts}
+    if "impact-set" in parts:
+        for name, category in IMPACT_CATEGORY_MAP.items():
+            if name in parts:
+                return category
+    if "sesa" in parts:
+        name = file_path.name.lower()
+        if name.startswith(("gunshot", "explosion")):
+            return "impulsive"
+        if name.startswith("siren"):
+            return "stationary"
+        if name.startswith("casual"):
+            return "non_stationary"
+    return None
 
 
 
-def categorize(file_path: pathlib.Path, esc50_map: Dict[str, str]) -> str:
+
+
+def categorize(file_path: pathlib.Path, esc50_map: Dict[str, str],
+               mad_map: Dict[str, str]) -> str:
 
     """Categorizes an audio file based on metadata lookup or keyword matching."""
 
-    # 1. ESC-50 exact metadata match
+    # 1. Source-specific metadata / folder class
+    source = source_category(file_path, mad_map)
+    if source is not None:
+        return source
+
+    # 2. ESC-50 exact metadata match
 
     if file_path.name in esc50_map:
 
@@ -160,7 +222,7 @@ def categorize(file_path: pathlib.Path, esc50_map: Dict[str, str]) -> str:
 
 
 
-    # 2. FreeNoise keyword fallback
+    # 3. FreeNoise keyword fallback
 
     stem = file_path.stem.lower()
 
@@ -183,6 +245,7 @@ def build_manifest(noise_dir: str, out_csv: str) -> int:
     base_dir = pathlib.Path(noise_dir)
 
     esc50_map = load_esc50_manifest(base_dir)
+    mad_map = load_mad_manifest(base_dir)
 
 
 
@@ -192,7 +255,7 @@ def build_manifest(noise_dir: str, out_csv: str) -> int:
 
         if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
 
-            category = categorize(file_path, esc50_map)
+            category = categorize(file_path, esc50_map, mad_map)
 
             rows.append({"path": str(file_path), "category": category})
 

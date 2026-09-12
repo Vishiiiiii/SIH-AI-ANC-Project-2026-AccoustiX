@@ -1,0 +1,38 @@
+# Deployment-faithful successor to dualmic_v1.
+# Its input manifests must be created with preprocess_dualmic.py
+# --block_samples 2048, matching the 128 ms live audio callback.
+sample_rate: 16000
+segment_seconds: 0.128
+model: dual_mic_rnnoise
+model_params:
+  dual_mic_rnnoise:
+    n_fft: 512
+    hop_length: 128
+    gru_hidden: 256
+
+train:
+  batch_size: 24
+  num_workers: 0
+  epochs: 60
+  lr: 0.0005
+  l1_weight: 0.1
+  # Differentiable spectral fidelity proxy; PESQ itself cannot be back-propagated.
+  spectral_weight: 0.5
+  weight_decay: 0.00001
+  gradient_clip_norm: 5.0
+  lr_decay: 0.5
+  lr_patience: 5
+  checkpoint_dir: checkpoints/dualmic_v2_live
+  device: cuda
+
+front_end:
+  nlms_taps: 128
+  nlms_mu: 0.002
+  use_wiener: true
+  block_samples: 2048
+
+data:
+  input: dual_mic
+  train_manifest: data/dual_mic_v2_live/manifests_front_end/train.csv
+  val_manifest: data/dual_mic_v2_live/manifests_front_end/val.csv
+  test_manifest: data/dual_mic_v2_live/manifests_front_end/test.csv

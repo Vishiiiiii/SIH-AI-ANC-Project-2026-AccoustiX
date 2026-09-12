@@ -18,20 +18,20 @@ ENV/
 myenv/
 SIH_venv/
 
-# Data Files (IMPORTANT: Only ignore raw and processed data folders)
-anc-system/data/raw/noise/esc50/ESC-50-master/
-anc-system/data/raw/speech/LibriSpeech/
-anc-system/data/raw/noise/freenoise/
-anc-system/data/processed/
+# Local audio data and generated manifests. These contain corpora and
+# machine-specific absolute paths, so they are intentionally never shared.
+/anc-system/data/raw/
+/anc-system/data/processed/
+/anc-system/data/processed_test/
+/anc-system/data/dual_mic_v1/
+/anc-system/data/dual_mic_v2_live/
+/anc-system/data/manifests/*.csv
 anc-system/data/manifests/*.csv
 !anc-system/data/manifests/.gitkeep
 
-# Model Checkpoints (Large files)
-checkpoints/
-*.pt
-*.pth
-*.onnx
-*.pb
+# Trained model artifacts are intentionally versioned. All current artifacts
+# are below GitHub's 100 MB per-file limit and allow collaborators to export
+# ONNX or run the live demo without rebuilding the datasets.
 
 # IDE
 .vscode/
@@ -50,7 +50,5 @@ logs/
 *.log
 demo_output/
 results/
-/anc-system/data/raw/noise/freenoise/**
-/anc-system/data/raw/**
 dummy.txt
 test-ignore.txt
