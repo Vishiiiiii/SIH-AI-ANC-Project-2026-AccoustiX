@@ -100,6 +100,26 @@ ESC50_CATEGORY_MAP = {
 
 
 
+# For sources organized as <category_name>/*.wav (SESA, Impact-set, via
+# ingest_dataset_acoustix.py) rather than a lookup CSV or a descriptive
+# filename — matched against the immediate parent folder name. "bounce"
+# (an Impact-set class) is deliberately absent: not relevant to any of the
+# 3 DRDO noise categories, so it's left unmapped and dropped like any other
+# "unknown" clip.
+DIRECTORY_CATEGORY_MAP = {
+    "casual": "non_stationary",
+    "gunshot": "impulsive",
+    "gunshots": "impulsive",
+    "explosion": "impulsive",
+    "siren": "stationary",       # matches the existing ESC-50 siren mapping above
+    "knocks": "impulsive",
+    "punch": "impulsive",
+    "smash": "impulsive",
+    "footsteps": "non_stationary",
+}
+
+
+
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp4", ".mp3", ".ogg", ".m4a"}
 
 
@@ -160,7 +180,18 @@ def categorize(file_path: pathlib.Path, esc50_map: Dict[str, str]) -> str:
 
 
 
-    # 2. FreeNoise keyword fallback
+    # 2. Directory-based match (SESA / Impact-set style: category is the
+    # immediate parent folder name — an explicit label, checked before the
+    # keyword fallback below since that one does substring matching and
+    # would otherwise misfire here (e.g. ingest_dataset_acoustix.py prefixes
+    # Impact-set filenames with "train_"/"test_" for uniqueness, and "rain"
+    # is a substring of "train" — without this ordering every Impact-set
+    # train-split clip would get silently mislabeled non_stationary).
+    parent = file_path.parent.name.lower()
+    if parent in DIRECTORY_CATEGORY_MAP:
+        return DIRECTORY_CATEGORY_MAP[parent]
+
+    # 3. FreeNoise keyword fallback
 
     stem = file_path.stem.lower()
 
@@ -169,8 +200,6 @@ def categorize(file_path: pathlib.Path, esc50_map: Dict[str, str]) -> str:
         if keyword in stem:
 
             return category
-
-
 
     return "unknown"
 
@@ -189,6 +218,13 @@ def build_manifest(noise_dir: str, out_csv: str) -> int:
     rows = []
 
     for file_path in base_dir.rglob("*"):
+
+        # Skip *_backup folders (e.g. freenoise_backup, esc50_backup) — these
+        # are pre-conversion snapshots kept as a safety copy, not meant to be
+        # part of the active corpus. Including them just duplicates content
+        # already present (post-conversion) elsewhere under the same noise_dir.
+        if any(part.endswith("_backup") for part in file_path.parts):
+            continue
 
         if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
 

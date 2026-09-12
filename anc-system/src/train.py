@@ -84,7 +84,17 @@ def train(cfg):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--model", choices=list(MODEL_REGISTRY), default=None,
+                         help="Override the config's model: field, e.g. to run "
+                              "rnnoise/dtln/conv_tasnet back to back without editing the YAML")
+    parser.add_argument("--checkpoint_dir", default=None,
+                         help="Override train.checkpoint_dir, e.g. checkpoints/dtln, so runs "
+                              "for different models don't overwrite each other's best_model.pt")
     args = parser.parse_args()
     with open(args.config) as fh:
         cfg = yaml.safe_load(fh)
+    if args.model:
+        cfg["model"] = args.model
+    if args.checkpoint_dir:
+        cfg["train"]["checkpoint_dir"] = args.checkpoint_dir
     train(cfg)

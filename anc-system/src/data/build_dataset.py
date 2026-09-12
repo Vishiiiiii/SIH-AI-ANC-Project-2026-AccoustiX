@@ -34,23 +34,56 @@ def build_split(split_name, n_examples, speech_files, noise_rows, out_dir, snrs,
     split_dir = pathlib.Path(out_dir) / split_name
     split_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_rows = []
-    for i in range(n_examples):
-        speech_path = rng.choice(speech_files)
-        noise_row = rng.choice(noise_rows)
-        snr = rng.choice(snrs)
+    # Sample category first, then a clip within it — NOT rng.choice(noise_rows)
+    # directly. The raw noise pool is unevenly sized per category (e.g. far
+    # more non_stationary clips than stationary), so choosing rows uniformly
+    # would silently skew the mixed dataset toward whichever category has the
+    # most source recordings instead of giving stationary/non_stationary/
+    # impulsive equal representation — which matters since that 3-way split
+    # is exactly what the DRDO problem statement asks for and what
+    # evaluate.py reports on per-category.
+    by_category = {}
+    for row in noise_rows:
+        by_category.setdefault(row["category"], []).append(row)
+    categories = sorted(by_category)
 
-        clean, sr = sf.read(speech_path)
-        noise, noise_sr = sf.read(noise_row["path"])
-        if noise_sr != sr:
-            raise ValueError(
-                f"Sample-rate mismatch: {speech_path} @ {sr}Hz vs {noise_row['path']} @ {noise_sr}Hz. "
-                "Resample your corpora to a common rate (16kHz recommended) before mixing."
+    manifest_rows = []
+    bad_files = set()
+    for i in range(n_examples):
+        # A handful of source files (e.g. some FreeNoise .mp3 clips libsndfile
+        # can't decode) are unreadable — skip and retry with a different pick
+        # rather than letting one bad file kill an otherwise-fine 4000-example
+        # run. Capped attempts so a systematically broken corpus still fails
+        # loudly instead of spinning forever.
+        for attempt in range(20):
+            speech_path = rng.choice(speech_files)
+            noise_row = rng.choice(by_category[rng.choice(categories)])
+            snr = rng.choice(snrs)
+            try:
+                clean, sr = sf.read(speech_path)
+            except Exception as exc:
+                bad_files.add((speech_path, str(exc)))
+                continue
+            try:
+                noise, noise_sr = sf.read(noise_row["path"])
+            except Exception as exc:
+                bad_files.add((noise_row["path"], str(exc)))
+                continue
+            if noise_sr != sr:
+                raise ValueError(
+                    f"Sample-rate mismatch: {speech_path} @ {sr}Hz vs {noise_row['path']} @ {noise_sr}Hz. "
+                    "Resample your corpora to a common rate (16kHz recommended) before mixing."
+                )
+            break
+        else:
+            raise RuntimeError(
+                f"Couldn't find a readable speech/noise pair after 20 attempts at example {i} "
+                f"of split '{split_name}' — check data/raw for widespread corrupt/unsupported files."
             )
 
         if noise_row["category"] == "impulsive":
             noise = randomize_impulsive_onset(noise, len(clean))
-        
+
         noisy, clean = mix_at_snr(clean, noise, snr)
 
         noisy_path = split_dir / f"noisy_{i:05d}.wav"
@@ -71,6 +104,10 @@ def build_split(split_name, n_examples, speech_files, noise_rows, out_dir, snrs,
         writer.writeheader()
         writer.writerows(manifest_rows)
     print(f"{split_name}: wrote {len(manifest_rows)} pairs -> {manifest_out}")
+    if bad_files:
+        print(f"{split_name}: skipped {len(bad_files)} unreadable source file(s):")
+        for path, err in sorted(bad_files):
+            print(f"    {path}  ({err})")
 
 
 if __name__ == "__main__":

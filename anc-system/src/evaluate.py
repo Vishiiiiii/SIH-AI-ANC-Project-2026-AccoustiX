@@ -88,7 +88,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--model", choices=list(MODEL_REGISTRY), default=None,
+                         help="Override the config's model: field to match the checkpoint being evaluated")
     args = parser.parse_args()
     with open(args.config) as fh:
         cfg = yaml.safe_load(fh)
+    if args.model:
+        cfg["model"] = args.model
     evaluate(cfg, args.checkpoint)
